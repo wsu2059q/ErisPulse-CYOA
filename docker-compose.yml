@@ -1,0 +1,12 @@
+services:
+  cyoa-bot:
+    build: .
+    container_name: cyoa-bot
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config:/app/config
+    environment:
+      - TZ=Asia/Shanghai
+      - ERISPULSE_DASHBOARD_TOKEN=${ERISPULSE_DASHBOARD_TOKEN:-}
+    restart: unless-stopped

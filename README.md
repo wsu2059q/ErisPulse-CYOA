@@ -16,6 +16,37 @@
 epsdk install CYOA
 ```
 
+## Docker 部署
+
+### docker compose（推荐）
+
+```bash
+# 复制配置模板
+cp -r config/ ./docker-config/
+
+# 编辑配置（填写适配器 token 等）
+# vim docker-config/config.toml
+
+# 设置 Dashboard Token（可选）
+export ERISPULSE_DASHBOARD_TOKEN=your-token
+
+# 启动
+docker compose up -d
+```
+
+### docker run
+
+```bash
+docker run -d \
+  --name cyoa-bot \
+  -p 8000:8000 \
+  -v $(pwd)/config:/app/config \
+  -e TZ=Asia/Shanghai \
+  -e ERISPULSE_DASHBOARD_TOKEN=your-token \
+  --restart unless-stopped \
+  ghcr.io/erispulse/erispulse-cyoa:latest
+```
+
 ## 命令
 
 ```
