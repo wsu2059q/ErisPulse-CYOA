@@ -44,7 +44,7 @@ docker run -d \
   -e TZ=Asia/Shanghai \
   -e ERISPULSE_DASHBOARD_TOKEN=your-token \
   --restart unless-stopped \
-  ghcr.io/erispulse/erispulse-cyoa:latest
+  ghcr.io/wsu2059q/erispulse-cyoa:latest
 ```
 
 ## 命令
