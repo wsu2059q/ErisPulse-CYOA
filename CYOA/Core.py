@@ -80,6 +80,7 @@ class Main(BaseModule):
             "load": self._load, "读档": self._load,
             "restart": self._restart,
             "quit": self._quit, "exit": self._quit,
+            "delete": self._cmd_delete, "删除": self._cmd_delete,
         }
 
         fn = cmds.get(sub)
@@ -94,7 +95,7 @@ class Main(BaseModule):
             "/cyoa list - 故事\n"
             "/cyoa play <ID> - 开始\n"
             "/cyoa import <URL> - 导入\n"
-            "/cyoa save|load|restart|quit\n"
+            "/cyoa delete <ID> - 删除导入\n"
             "/cyoa repo list|add|remove|update"
         )
 
@@ -127,14 +128,56 @@ class Main(BaseModule):
         if not HAS_INK:
             return await event.reply("inkpython 未安装。 pip install inkpython")
 
+        resolves = self._resolve_story(story_id)
+        if not resolves:
+            return await event.reply(f"未找到 '{story_id}'。")
+        if len(resolves) > 1:
+            return await self._pick_story(event, story_id, resolves)
+
+        ref = resolves[0]["ref"]
         key = self._key(event, story_id)
         if key in self._sessions:
             return await event.reply("已在游戏中。 /cyoa quit 退出。")
 
-        ink_json = await self._find_story(event, story_id)
+        ink_json = await self._find_story(event, ref)
         if not ink_json:
-            return
+            return await event.reply("故事文件丢失。")
 
+        await self._start_game(event, story_id, ink_json, key)
+
+    def _resolve_story(self, story_id: str) -> list[dict]:
+        results = []
+        for s in self._repo.list_all_stories():
+            if s["id"] == story_id:
+                results.append({
+                    "ref": f"repo:{s['repo_name']}|{story_id}",
+                    "title": s.get("title", story_id),
+                    "source": f"仓库: {s['repo_name']}",
+                })
+        for s in self._repo.list_imported():
+            if s["id"] == story_id:
+                results.append({
+                    "ref": f"imported|{story_id}",
+                    "title": s.get("title", story_id),
+                    "source": "导入",
+                })
+        return results
+
+    async def _pick_story(self, event, story_id: str, resolves: list[dict]):
+        opts = [f"{r['title']} ({r['source']})" for r in resolves]
+        idx = await event.choose(f"'{story_id}' 有多个来源，选择哪一个？", opts, timeout=30)
+        if idx is None:
+            return await event.reply("已取消。")
+        ref = resolves[idx]["ref"]
+        key = self._key(event, story_id)
+        if key in self._sessions:
+            return await event.reply("已在游戏中。 /cyoa quit 退出。")
+        ink_json = await self._find_story(event, ref)
+        if not ink_json:
+            return await event.reply("故事文件丢失。")
+        await self._start_game(event, story_id, ink_json, key)
+
+    async def _start_game(self, event, story_id: str, ink_json: str, key: str):
         saved = self._get_save(event, story_id)
         state = saved.get("ink_state") if saved else None
 
@@ -163,30 +206,40 @@ class Main(BaseModule):
             self.logger.error(f"Render: {e}")
             await event.reply(engine.text or "(开始)")
 
-    async def _find_story(self, event, story_id: str) -> Optional[str]:
-        # imported
-        t = self._repo.get_imported(story_id)
-        if t:
-            return t
-        # cached
-        for r in self._repo.list_repos():
-            t = self._repo.get_cached_story(r["name"], story_id)
+    async def _find_story(self, event, ref: str) -> Optional[str]:
+        # ref: "repo:<name>|<id>" or "imported|<id>" or just "<id>"
+        if ref.startswith("repo:"):
+            _, rest = ref.split(":", 1)
+            repo_name, story_id = rest.split("|", 1)
+            t = self._repo.get_cached_story(repo_name, story_id)
             if t:
                 return t
-        # download
+            idx = self._repo.get_index(repo_name)
+            if idx:
+                for s in idx.get("stories", []):
+                    if s["id"] == story_id:
+                        ok, t, _ = await self._repo.download_story(repo_name, story_id)
+                        if ok and t:
+                            return t
+        if ref.startswith("imported|"):
+            story_id = ref.split("|", 1)[1]
+            return self._repo.get_imported(story_id)
+        # plain id (single match)
+        t = self._repo.get_imported(ref)
+        if t:
+            return t
         for r in self._repo.list_repos():
+            t = self._repo.get_cached_story(r["name"], ref)
+            if t:
+                return t
             idx = self._repo.get_index(r["name"])
             if not idx:
                 continue
             for s in idx.get("stories", []):
-                if s["id"] == story_id:
-                    await event.reply("下载中...")
-                    ok, t, msg = await self._repo.download_story(r["name"], story_id)
+                if s["id"] == ref:
+                    ok, t, _ = await self._repo.download_story(r["name"], ref)
                     if ok and t:
                         return t
-                    await event.reply(f"下载失败: {msg}")
-                    return None
-        await event.reply(f"未找到 '{story_id}'。")
         return None
 
     async def _import(self, event, *args):
@@ -241,6 +294,31 @@ class Main(BaseModule):
         self._persist(key, 1)
         self._remove(key)
         await event.reply("已退出，进度已保存。")
+
+    async def _cmd_delete(self, event, story_id=""):
+        if not story_id:
+            return await event.reply("/cyoa delete <故事ID>")
+
+        resolves = self._resolve_story(story_id)
+        imported = [r for r in resolves if r["ref"].startswith("imported|")]
+        if not imported:
+            return await event.reply(f"'{story_id}' 没有导入版本，只能删除导入的故事。")
+
+        if len(imported) > 1:
+            # shouldn't happen but just in case
+            opts = [r["title"] for r in imported]
+            idx = await event.choose(f"删除 '{story_id}' 的哪个？", opts, timeout=15)
+            if idx is None:
+                return await event.reply("已取消。")
+            target = imported[idx]
+        else:
+            target = imported[0]
+
+        ok = self._repo.delete_imported(story_id)
+        if ok:
+            await event.reply(f"已删除 '{story_id}'。")
+        else:
+            await event.reply("删除失败。")
 
     async def _repo_cmd(self, event, *args):
         args = list(args)
