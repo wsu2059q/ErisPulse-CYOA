@@ -29,10 +29,31 @@ epsdk install CYOA
 
 ## 快速开始
 
+导入编译好的 `.ink.json` 直接玩：
+
 ```
 /cyoa import https://example.com/my_story.ink.json
 /cyoa play my_story
 ```
+
+或添加小说仓库，一次更新就能获取全部故事：
+
+```
+/cyoa repo add <名称> https://raw.githubusercontent.com/<用户>/<仓库>/main
+/cyoa repo update
+/cyoa list
+/cyoa play <故事ID>
+```
+
+## 推荐仓库
+
+我们维护的官方故事合集：
+
+```
+/cyoa repo add official https://raw.githubusercontent.com/wsu2059q/cyoa-stories/main
+```
+
+贡献请 Fork [cyoa-stories](https://github.com/wsu2059q/cyoa-stories)。
 
 ## 编写故事
 
