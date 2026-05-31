@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 import time
-from typing import Optional, Dict
+from typing import Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -19,42 +19,23 @@ from .platform_buttons import PlatformButtons
 from .story_repo import StoryRepo
 from .templates import StoryTemplates
 
-_MAIN_MAP = {
-    "1": "play", "开始": "play", "play": "play", "开始游戏": "play",
-    "2": "list", "列表": "list", "list": "list", "故事列表": "list", "查看": "list",
-    "3": "import", "导入": "import", "import": "import", "导入故事": "import",
-    "4": "save", "存档": "save", "save": "save", "存档管理": "save",
-    "5": "repo", "仓库": "repo", "repo": "repo", "仓库管理": "repo",
-    "6": "delete", "删除": "delete", "delete": "delete", "删除故事": "delete",
-    "7": "continue", "继续": "continue", "继续游戏": "continue",
-    "8": "quit", "退出": "quit", "退出游戏": "quit",
-}
-
-_IMPORT_MAP = {
-    "1": "url", "url": "url", "链接": "url",
-    "2": "file", "文件": "file",
-    "3": "paste", "粘贴": "paste", "粘贴导入": "paste",
-}
-
-_REPO_MAP = {
-    "1": "list", "查看": "list", "列表": "list",
-    "2": "add", "添加": "add",
-    "3": "update", "更新": "update",
-    "4": "remove", "删除": "remove", "移除": "remove",
-}
-
-_CAT_MAP = {
-    "1": "repo", "仓库": "repo", "仓库故事": "repo",
-    "2": "imported", "导入": "imported", "导入故事": "imported",
-}
-
 
 class Main(BaseModule):
     def __init__(self):
         self.sdk = sdk
         self.logger = sdk.logger.get_child("CYOA")
-        self.config = self._cfg()
-        self._repo = StoryRepo(sdk.storage, self.logger)
+        try:
+            self.config = self._cfg()
+            self.logger.info(f"[DIAG] __init__: _cfg() OK, config={self.config}")
+        except Exception as e:
+            self.logger.error(f"[DIAG] __init__: _cfg() FAILED: {e}")
+            self.config = {"default_timeout": 300, "max_saves": 5}
+        try:
+            self._repo = StoryRepo(sdk.storage, self.logger)
+            self.logger.info(f"[DIAG] __init__: StoryRepo OK")
+        except Exception as e:
+            self.logger.error(f"[DIAG] __init__: StoryRepo FAILED: {e}")
+            self._repo = None
         self._btn = PlatformButtons()
         self._engines: dict[str, InkEngine] = {}
         self._sessions: dict[str, GameSession] = {}
@@ -62,6 +43,7 @@ class Main(BaseModule):
         self._btn_h = None
         self._msg_h = None
         self._file_import_pending: dict[str, float] = {}
+        self.logger.info("[DIAG] __init__ complete")
 
     @staticmethod
     def get_load_strategy():
@@ -84,18 +66,36 @@ class Main(BaseModule):
         if not HAS_INK:
             self.logger.warning("inkpython not installed. pip install inkpython")
 
-        @command("cyoa", aliases=["互动小说", "故事"], help="CYOA 互动小说")
-        async def _cyoa(evt):
-            await self._dispatch(evt)
+        try:
+            @command("cyoa", aliases=["互动小说", "故事"], help="CYOA 互动小说")
+            async def _cyoa(evt):
+                await self._dispatch(evt)
+            self.logger.info(f"[DIAG] command registered OK")
+        except Exception as e:
+            self.logger.error(f"[DIAG] command registration FAILED: {e}")
 
-        self._btn_h = notice.on_notice(priority=40)(self._on_button)
-        self._msg_h = message.on_message(priority=50)(self._on_message)
+        try:
+            self._btn_h = notice.on_notice(priority=0)(self._on_button)
+            self.logger.info(f"[DIAG] notice handler registered OK (priority=0)")
+        except Exception as e:
+            self.logger.error(f"[DIAG] notice registration FAILED: {e}")
+
+        try:
+            self._msg_h = message.on_message(priority=0)(self._on_message)
+            self.logger.info(f"[DIAG] message handler registered OK (priority=0)")
+        except Exception as e:
+            self.logger.error(f"[DIAG] message registration FAILED: {e}")
 
         self._cleanup_task = asyncio.ensure_future(self._idle_cleanup_loop())
+        try:
+            self._register_routes()
+        except Exception as e:
+            self.logger.error(f"[DIAG] route registration FAILED: {e}")
 
-        self._register_routes()
-        self._register_dashboard_view()
-        self.logger.info("CYOA v2 loaded (Ink + Interactive Menu)")
+        try:
+            self._register_dashboard_view()
+        except Exception as e:
+            self.logger.error(f"[DIAG] dashboard registration FAILED: {e}")
 
     async def on_unload(self, event):
         self._save_all()
@@ -153,36 +153,30 @@ class Main(BaseModule):
         _, key = self._find(event)
         has_game = key is not None
 
-        await self._send_templates(event, StoryTemplates.build_main_menu(has_game))
-        reply = await event.wait_reply(timeout=60)
-        if not reply:
+        items = [
+            "开始游戏", "故事列表", "导入故事", "存档管理",
+            "仓库管理", "删除故事",
+        ]
+        if has_game:
+            items += ["继续游戏", "退出游戏"]
+
+        idx = await event.choose("CYOA 互动小说 — 选择操作", items, timeout=60)
+        if idx is None:
             return
 
-        text = reply.get_text().strip().lower()
-        action = _MAIN_MAP.get(text)
-        if not action:
-            await self._send_templates(event, StoryTemplates.build_status_msg("未知操作，请重新 /cyoa"))
-            return
+        handlers = [
+            self._menu_play, self._menu_list, self._menu_import,
+            self._menu_save, self._menu_repo, self._menu_delete,
+        ]
+        if has_game:
+            handlers += [self._menu_continue, self._menu_quit]
 
-        handlers = {
-            "play": self._menu_play,
-            "list": self._menu_list,
-            "import": self._menu_import,
-            "save": self._menu_save,
-            "repo": self._menu_repo,
-            "delete": self._menu_delete,
-            "continue": self._menu_continue,
-            "quit": self._menu_quit,
-        }
-        fn = handlers.get(action)
-        if fn:
-            await fn(event, reply)
-        else:
-            await self._send_templates(event, StoryTemplates.build_status_msg("未知操作"))
+        if 0 <= idx < len(handlers):
+            await handlers[idx](event)
 
     # ─── menu: play ───────────────────────────────────────────────
 
-    async def _menu_play(self, event, reply=None):
+    async def _menu_play(self, event):
         _, active_key = self._find(event)
         if active_key and self._is_game_stuck(active_key):
             sid = self._sessions[active_key].story_id if active_key in self._sessions else "?"
@@ -196,43 +190,21 @@ class Main(BaseModule):
             return await self._send_templates(event, StoryTemplates.build_status_msg(
                 f"你已在游戏 '{sid}' 中。\n请先退出（主菜单 → 退出游戏），再开始新游戏。"))
 
-        await self._send_templates(event, StoryTemplates.build_category_menu())
-        r = await event.wait_reply(timeout=30)
-        if not r:
-            return
-        cat = _CAT_MAP.get(r.get_text().strip().lower())
-        if not cat:
-            await self._send_templates(event, StoryTemplates.build_status_msg("已取消"))
-            return
+        cat_idx = await event.choose("选择故事分类:", ["仓库故事", "导入故事"], timeout=30)
+        if cat_idx is None:
+            return await self._send_templates(event, StoryTemplates.build_status_msg("已取消"))
 
+        cat = "repo" if cat_idx == 0 else "imported"
         stories = self._get_stories_by_cat(cat)
         if not stories:
-            await self._send_templates(event, StoryTemplates.build_status_msg("该分类暂无故事"))
-            return
+            return await self._send_templates(event, StoryTemplates.build_status_msg("该分类暂无故事"))
 
-        cat_name = "仓库故事" if cat == "repo" else "导入故事"
-        await self._send_templates(event, StoryTemplates.build_story_list(stories, cat_name))
+        opts = [f"{s.get('title', s['id'])} [{s.get('repo_name', '导入')}]" for s in stories]
+        idx = await event.choose(f"选择故事 ({len(stories)} 个):", opts, timeout=30)
+        if idx is None:
+            return await self._send_templates(event, StoryTemplates.build_status_msg("已取消"))
 
-        sr = await event.wait_reply(timeout=30)
-        if not sr:
-            return
-        sr_text = sr.get_text().strip()
-
-        chosen = None
-        if sr_text.isdigit():
-            idx = int(sr_text) - 1
-            if 0 <= idx < len(stories):
-                chosen = stories[idx]
-        if not chosen:
-            for s in stories:
-                if s["id"] == sr_text or s.get("title", "").lower() == sr_text.lower():
-                    chosen = s
-                    break
-
-        if not chosen:
-            await self._send_templates(event, StoryTemplates.build_status_msg("无效选择"))
-            return
-
+        chosen = stories[idx]
         resolves = self._resolve_story(chosen["id"])
         if not resolves:
             return await self._send_templates(event, StoryTemplates.build_status_msg(
@@ -278,37 +250,31 @@ class Main(BaseModule):
 
     # ─── menu: list ───────────────────────────────────────────────
 
-    async def _menu_list(self, event, reply=None):
-        await self._send_templates(event, StoryTemplates.build_category_menu())
-        r = await event.wait_reply(timeout=30)
-        if not r:
+    async def _menu_list(self, event):
+        cat_idx = await event.choose("选择故事分类:", ["仓库故事", "导入故事"], timeout=30)
+        if cat_idx is None:
             return
-        cat = _CAT_MAP.get(r.get_text().strip().lower())
-        if not cat:
-            await self._send_templates(event, StoryTemplates.build_status_msg("已取消"))
-            return
-
+        cat = "repo" if cat_idx == 0 else "imported"
         stories = self._get_stories_by_cat(cat)
         cat_name = "仓库故事" if cat == "repo" else "导入故事"
         await self._send_templates(event, StoryTemplates.build_story_list(stories, cat_name))
 
     # ─── menu: import ─────────────────────────────────────────────
 
-    async def _menu_import(self, event, reply=None):
-        await self._send_templates(event, StoryTemplates.build_import_menu())
-        r = await event.wait_reply(timeout=30)
-        if not r:
-            return
-        sub = _IMPORT_MAP.get(r.get_text().strip().lower())
-        if not sub:
-            await self._send_templates(event, StoryTemplates.build_status_msg("已取消"))
+    async def _menu_import(self, event):
+        idx = await event.choose("导入故事 — 选择方式:", [
+            "URL 导入 — 输入 .ink.json 文件链接",
+            "文件导入 — 发送 .ink.json 文件",
+            "粘贴导入 — 直接发送 JSON 内容",
+        ], timeout=30)
+        if idx is None:
             return
 
-        if sub == "url":
+        if idx == 0:
             await self._menu_import_url(event)
-        elif sub == "file":
+        elif idx == 1:
             await self._menu_import_file(event)
-        elif sub == "paste":
+        elif idx == 2:
             await self._menu_import_paste(event)
 
     async def _menu_import_url(self, event):
@@ -358,7 +324,7 @@ class Main(BaseModule):
 
     # ─── menu: save ───────────────────────────────────────────────
 
-    async def _menu_save(self, event, reply=None):
+    async def _menu_save(self, event):
         uid = self._uid(event)
         gid = self._gid(event)
         all_saves = self._repo.list_saves()
@@ -369,51 +335,44 @@ class Main(BaseModule):
         if not my_saves:
             return await self._send_templates(event, StoryTemplates.build_status_msg("暂无存档"))
 
-        await self._send_templates(event, StoryTemplates.build_save_list(my_saves))
-        r = await event.wait_reply(timeout=30)
-        if not r:
+        opts = [f"{sv.get('story_id', '?')} 槽位{sv.get('saved_slot', 1)}" for sv in my_saves]
+        idx = await event.choose(f"存档列表 ({len(my_saves)})", opts, timeout=30)
+        if idx is None:
             return
-        text = r.get_text().strip()
-        if not text.isdigit():
-            return
-        idx = int(text) - 1
-        if 0 <= idx < len(my_saves):
-            sv = my_saves[idx]
-            story_id = sv.get("story_id", "")
-            if story_id:
-                old_key = self._find(event)[1]
-                if old_key:
-                    self._remove(old_key)
-                ink_json = self._repo.get_imported(story_id)
-                if not ink_json:
-                    for repo in self._repo.list_repos():
-                        ink_json = self._repo.get_cached_story(repo["name"], story_id)
-                        if ink_json:
-                            break
-                if ink_json:
-                    key = self._key(event, story_id)
-                    await self._start_game(event, story_id, ink_json, key, state=sv.get("ink_state"))
-                else:
-                    await self._send_templates(event, StoryTemplates.build_status_msg("故事文件丢失，无法加载"))
+
+        sv = my_saves[idx]
+        story_id = sv.get("story_id", "")
+        if story_id:
+            old_key = self._find(event)[1]
+            if old_key:
+                self._remove(old_key)
+            ink_json = self._repo.get_imported(story_id)
+            if not ink_json:
+                for repo in self._repo.list_repos():
+                    ink_json = self._repo.get_cached_story(repo["name"], story_id)
+                    if ink_json:
+                        break
+            if ink_json:
+                key = self._key(event, story_id)
+                await self._start_game(event, story_id, ink_json, key, state=sv.get("ink_state"))
             else:
-                await self._send_templates(event, StoryTemplates.build_status_msg("存档数据异常"))
+                await self._send_templates(event, StoryTemplates.build_status_msg("故事文件丢失，无法加载"))
+        else:
+            await self._send_templates(event, StoryTemplates.build_status_msg("存档数据异常"))
 
     # ─── menu: repo ───────────────────────────────────────────────
 
-    async def _menu_repo(self, event, reply=None):
-        await self._send_templates(event, StoryTemplates.build_repo_menu())
-        r = await event.wait_reply(timeout=30)
-        if not r:
-            return
-        sub = _REPO_MAP.get(r.get_text().strip().lower())
-        if not sub:
-            await self._send_templates(event, StoryTemplates.build_status_msg("已取消"))
+    async def _menu_repo(self, event):
+        idx = await event.choose("仓库管理:", [
+            "查看仓库", "添加仓库", "更新仓库", "删除仓库",
+        ], timeout=30)
+        if idx is None:
             return
 
-        if sub == "list":
+        if idx == 0:
             repos = self._repo.list_repos()
             await self._send_templates(event, StoryTemplates.build_repo_list(repos))
-        elif sub == "add":
+        elif idx == 1:
             await self._send_templates(event, StoryTemplates.build_status_msg("请输入仓库名称："))
             rn = await event.wait_reply(timeout=30)
             if not rn:
@@ -429,7 +388,7 @@ class Main(BaseModule):
                 await self._send_templates(event, StoryTemplates.build_status_msg(f"已添加 '{name}'。请更新仓库索引。"))
             else:
                 await self._send_templates(event, StoryTemplates.build_status_msg(msg))
-        elif sub == "update":
+        elif idx == 2:
             repos = self._repo.list_repos()
             if not repos:
                 return await self._send_templates(event, StoryTemplates.build_status_msg("暂无仓库"))
@@ -438,52 +397,40 @@ class Main(BaseModule):
                 await self._send_templates(event, StoryTemplates.build_status_msg(f"更新 '{repos[0]['name']}': {msg}"))
             else:
                 opts = [r["name"] for r in repos] + ["全部"]
-                idx = await event.choose("选择要更新的仓库：", opts, timeout=30)
-                if idx is None:
+                idx2 = await event.choose("选择要更新的仓库：", opts, timeout=30)
+                if idx2 is None:
                     return
-                if idx == len(opts) - 1:
+                if idx2 == len(opts) - 1:
                     results = await self._repo.update_all()
                     lines = [f"{n}: {m}" for n, m in results.items()]
                     await self._send_templates(event, StoryTemplates.build_status_msg("\n".join(lines)))
                 else:
-                    ok, msg = await self._repo.update_repo(repos[idx]["name"])
-                    await self._send_templates(event, StoryTemplates.build_status_msg(f"更新 '{repos[idx]['name']}': {msg}"))
-        elif sub == "remove":
+                    ok, msg = await self._repo.update_repo(repos[idx2]["name"])
+                    await self._send_templates(event, StoryTemplates.build_status_msg(f"更新 '{repos[idx2]['name']}': {msg}"))
+        elif idx == 3:
             repos = self._repo.list_repos()
             if not repos:
                 return await self._send_templates(event, StoryTemplates.build_status_msg("暂无仓库"))
             opts = [f"{r['name']} ({r.get('story_count', 0)} 故事)" for r in repos]
-            idx = await event.choose("选择要删除的仓库：", opts, timeout=30)
-            if idx is None:
+            idx2 = await event.choose("选择要删除的仓库：", opts, timeout=30)
+            if idx2 is None:
                 return
-            ok, msg = self._repo.remove_repo(repos[idx]["name"])
-            await self._send_templates(event, StoryTemplates.build_status_msg(msg if not ok else f"已删除 '{repos[idx]['name']}'"))
+            ok, msg = self._repo.remove_repo(repos[idx2]["name"])
+            await self._send_templates(event, StoryTemplates.build_status_msg(msg if not ok else f"已删除 '{repos[idx2]['name']}'"))
 
     # ─── menu: delete ─────────────────────────────────────────────
 
-    async def _menu_delete(self, event, reply=None):
+    async def _menu_delete(self, event):
         imported = self._repo.list_imported()
         if not imported:
             return await self._send_templates(event, StoryTemplates.build_status_msg("没有可删除的导入故事"))
 
-        await self._send_templates(event, StoryTemplates.build_delete_menu(imported))
-        r = await event.wait_reply(timeout=30)
-        if not r:
+        opts = [f"{s.get('title', s['id'])} (ID: {s['id']})" for s in imported]
+        idx = await event.choose("选择要删除的故事:", opts, timeout=30)
+        if idx is None:
             return
-        text = r.get_text().strip()
-        target = None
-        if text.isdigit():
-            idx = int(text) - 1
-            if 0 <= idx < len(imported):
-                target = imported[idx]
-        if not target:
-            for s in imported:
-                if s["id"] == text:
-                    target = s
-                    break
-        if not target:
-            return await self._send_templates(event, StoryTemplates.build_status_msg("无效选择"))
 
+        target = imported[idx]
         ok = self._repo.delete_imported(target["id"])
         if ok:
             await self._send_templates(event, StoryTemplates.build_status_msg(f"已删除 '{target.get('title', target['id'])}'"))
@@ -492,7 +439,7 @@ class Main(BaseModule):
 
     # ─── menu: continue / quit ────────────────────────────────────
 
-    async def _menu_continue(self, event, reply=None):
+    async def _menu_continue(self, event):
         _, key = self._find(event)
         if not key:
             return await self._send_templates(event, StoryTemplates.build_status_msg("当前没有进行中的游戏"))
@@ -598,46 +545,23 @@ class Main(BaseModule):
                     await self._send_templates(event, StoryTemplates.build_import_fail(f"导入失败: {e}"))
                 return
 
-    # ─── rich text send ───────────────────────────────────────────
+    # ─── text send ─────────────────────────────────────────────────
 
-    @staticmethod
-    def _select_best_format(platform: str, templates: Dict[str, str]) -> tuple:
+    async def _send_templates(self, target, text: str):
         try:
-            methods = sdk.adapter.list_sends(platform)
-            if "Html" in methods:
-                return ("Html", templates["html"])
-            if "Markdown" in methods:
-                return ("Markdown", templates["markdown"])
-            return ("Text", templates["text"])
+            await target.reply(text)
         except Exception:
-            return ("Text", templates["text"])
-
-    async def _send_templates(self, target, templates: Dict[str, str]):
-        platform = target.get_platform() if hasattr(target, "get_platform") else "sandbox"
-        fmt, content = self._select_best_format(platform, templates)
-        try:
-            await target.reply(content, method=fmt)
-        except Exception:
-            try:
-                await target.reply(templates.get("text", ""))
-            except Exception:
-                pass
+            pass
 
     async def _send_templates_adapter(self, adapter, platform: str, tt: str, tid: str,
-                                       templates: Dict[str, str],
-                                       bot_id: str = None):
+                                       text: str, bot_id: str = None):
         send = adapter.Send
         if bot_id:
             send = send.Using(bot_id)
-        send = send.To(tt, tid)
-        fmt, content = self._select_best_format(platform, templates)
         try:
-            await getattr(send, fmt)(content)
+            await send.To(tt, tid).Text(text)
         except Exception:
-            try:
-                await send.Text(templates.get("text", ""))
-            except Exception:
-                pass
+            pass
 
     # ─── game engine ──────────────────────────────────────────────
 
@@ -791,9 +715,12 @@ class Main(BaseModule):
 
                 opts = [c["text"] for c in choices]
                 prompt = text if text else "请选择:"
-                idx = await event.choose(prompt, opts, timeout=self._timeout)
+                _game_timeout = min(self._timeout, 120)
+                self.logger.debug(f"[WAIT] _loop choose: {len(opts)} options (timeout={_game_timeout}s, key={key})")
+                idx = await event.choose(prompt, opts, timeout=_game_timeout)
 
                 if idx is None:
+                    self.logger.debug(f"[WAIT] _loop choose: TIMED OUT (key={key})")
                     self._persist(key, 1)
                     self._remove(key)
                     try:
