@@ -131,6 +131,34 @@ class StoryRepo:
 
     # ─── Imported ─────────────────────────────────────────────────
 
+    def _validate_ink_json(self, text: str) -> tuple[bool, Optional[dict], str]:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return False, None, "无效 JSON"
+        if not isinstance(data, dict) or "inkVersion" not in data:
+            return False, None, "不是有效的 Ink JSON 文件（缺少 inkVersion）。请用 Inky/inklecate 编译 .ink 文件。"
+        return True, data, "OK"
+
+    def _save_imported_file(self, story_id: str, content: str):
+        dir_path = os.path.join(self._cache_dir, "imported", story_id)
+        os.makedirs(dir_path, exist_ok=True)
+        with open(os.path.join(dir_path, "story.ink.json"), "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def _register_imported(self, story_id: str, url: str = "", title: str = ""):
+        imported = self._storage.get("cyoa.imported") or []
+        if not any(s.get("id") == story_id for s in imported):
+            imported.append({
+                "id": story_id,
+                "title": title or story_id,
+                "author": "Unknown",
+                "version": "1.0.0",
+                "url": url,
+                "imported_at": time.time(),
+            })
+            self._storage.set("cyoa.imported", imported)
+
     async def import_story(self, url: str) -> tuple[bool, Optional[str], Optional[str], str]:
         import re as _re
         dl = url
@@ -151,36 +179,49 @@ class StoryRepo:
         except aiohttp.ClientError as e:
             return False, None, None, f"网络错误: {e}"
 
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return False, None, None, "无效 JSON"
-
-        if not isinstance(data, dict) or "inkVersion" not in data:
-            return False, None, None, "不是有效的 Ink JSON 文件（缺少 inkVersion）。请用 Inky/inklecate 编译 .ink 文件。"
+        ok, data, msg = self._validate_ink_json(text)
+        if not ok:
+            return False, None, None, msg
 
         story_id = url.rsplit("/", 1)[-1].replace(".ink.json", "").replace(".json", "")
         if not story_id or story_id in ("raw", "blob", "main", "master"):
             story_id = f"imported_{int(time.time())}"
 
-        dir_path = os.path.join(self._cache_dir, "imported", story_id)
-        os.makedirs(dir_path, exist_ok=True)
-        with open(os.path.join(dir_path, "story.ink.json"), "w", encoding="utf-8") as f:
-            f.write(text)
-
-        imported = self._storage.get("cyoa.imported") or []
-        if not any(s.get("id") == story_id for s in imported):
-            imported.append({
-                "id": story_id,
-                "title": story_id,
-                "author": "Unknown",
-                "version": "1.0.0",
-                "url": dl,
-                "imported_at": time.time(),
-            })
-            self._storage.set("cyoa.imported", imported)
+        self._save_imported_file(story_id, text)
+        self._register_imported(story_id, url=dl, title=data.get("title", ""))
 
         return True, story_id, text, "OK"
+
+    def import_from_content(self, json_str: str, source: str = "paste") -> tuple[bool, Optional[str], str]:
+        ok, data, msg = self._validate_ink_json(json_str)
+        if not ok:
+            return False, None, msg
+
+        story_id = f"imported_{int(time.time())}"
+
+        self._save_imported_file(story_id, json_str)
+        self._register_imported(story_id, url=f"{source}://{story_id}", title=data.get("title", ""))
+
+        if self._logger:
+            self._logger.info(f"Imported from {source}: {story_id}")
+        return True, story_id, "OK"
+
+    def import_from_bytes(self, data: bytes, filename: str = "") -> tuple[bool, Optional[str], str]:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = data.decode("gbk")
+            except UnicodeDecodeError:
+                return False, None, "文件编码无法识别，请使用 UTF-8 编码。"
+
+        source = "file"
+        if filename:
+            clean = filename.replace(".ink.json", "").replace(".json", "")
+            if clean and clean not in ("raw", "blob", "main", "master"):
+                source = f"file:{clean}"
+
+        return self.import_from_content(text, source=source)
 
     def list_imported(self) -> list[dict]:
         return self._storage.get("cyoa.imported") or []
@@ -208,3 +249,23 @@ class StoryRepo:
         if os.path.isdir(p):
             shutil.rmtree(p, ignore_errors=True)
         return True
+
+    def list_saves(self) -> list[dict]:
+        saves = []
+        keys = self._storage.keys() if hasattr(self._storage, "keys") else []
+        for k in keys:
+            if k.startswith("cyoa.saves."):
+                try:
+                    st = self._storage.get(k)
+                    if st and st.get("story_id"):
+                        st["_key"] = k
+                        saves.append(st)
+                except Exception:
+                    pass
+        return saves
+
+    def delete_save(self, key: str) -> bool:
+        if self._storage.get(key):
+            self._storage.delete(key)
+            return True
+        return False

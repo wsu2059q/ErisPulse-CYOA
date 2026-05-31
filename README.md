@@ -8,7 +8,6 @@
 - **跨平台按钮** — Telegram / 云湖 / QQBot 按钮 + `event.choose()` 回退
 - **仓库分发** — 添加 Git 仓库自动获取故事
 - **独立存档** — 每用户每故事多槽位
-- **图片支持** — `# image:` 标签
 
 <img width="568" height="398" alt="image" src="https://github.com/user-attachments/assets/3cc1839b-7502-4aa1-9b47-ab9795666c19" />
 

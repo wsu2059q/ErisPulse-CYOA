@@ -137,12 +137,10 @@ VAR count = 0
 Ink 的 `#` 标签可用于向引擎传递元数据：
 
 ```ink
-# image: https://example.com/bg.png
 # author: Star
 ```
 
 支持的标签：
-- `# image: <URL>` — 节点图片
 - `# author: <Name>` — 作者（仅第一个 knot 的标签生效）
 
 ---
@@ -177,7 +175,6 @@ inklecate -o story.ink.json story.ink
 
 ```ink
 # author: ErisPulse
-# image: https://example.com/dragon.png
 
 VAR hp = 100
 -> start
@@ -223,4 +220,3 @@ VAR hp = 100
 
 - 需用 Inky/inklecate 编译为 `.ink.json` 后导入
 - 引擎不处理自定义逻辑 — 所有分支和变量都在 Ink 中完成
-- 图片通过 `# image:` 标签标记
