@@ -802,26 +802,14 @@ class Main(BaseModule):
                     key = k
                     break
             if not key:
-                try:
-                    await event.reply("当前没有进行中的游戏。")
-                except Exception:
-                    pass
                 return
 
             eng = self._engines.get(key)
             if not eng:
-                try:
-                    await event.reply("游戏会话丢失，请 /cyoa 重新开始。")
-                except Exception:
-                    pass
                 self._remove(key)
                 return
 
             if key in self._locks:
-                try:
-                    await event.reply("游戏正在处理中，请稍候...")
-                except Exception:
-                    pass
                 return
 
             s = self._sessions.get(key)
@@ -829,24 +817,19 @@ class Main(BaseModule):
                 return
 
             if idx >= len(eng.choices):
-                try:
-                    await event.reply("无效选择。")
-                except Exception:
-                    pass
                 return
 
             await self._ack(event)
 
             if not eng.choose(idx):
-                await self._send_templates(event, StoryTemplates.build_status_msg(
+                await self._send_in_session(key, StoryTemplates.build_status_msg(
                     f"选择失败: {eng.error or '未知错误'}\n输入 /cyoa 退出。"))
                 self._persist(key, 1)
                 return
 
             if eng.is_ended:
-                end_tmpl = StoryTemplates.build_game_end(
-                    eng.text_plain, s.story_id)
-                await self._send_templates(event, end_tmpl)
+                await self._send_in_session(key, StoryTemplates.build_game_end(
+                    eng.text_plain, s.story_id))
                 self._persist(key, 1)
                 self._remove(key)
                 return
@@ -854,19 +837,19 @@ class Main(BaseModule):
             while not eng.text_plain and not eng.choices and not eng.is_ended:
                 eng._step()
             if eng.is_ended:
-                end_tmpl = StoryTemplates.build_game_end(eng.text_plain, s.story_id)
-                await self._send_templates(event, end_tmpl)
+                await self._send_in_session(key, StoryTemplates.build_game_end(
+                    eng.text_plain, s.story_id))
                 self._persist(key, 1)
                 self._remove(key)
                 return
 
             if not eng.text_plain and not eng.choices:
-                await self._send_templates(event, StoryTemplates.build_status_msg(
+                await self._send_in_session(key, StoryTemplates.build_status_msg(
                     "这步没有任何内容。输入 /cyoa → 继续游戏 跳过。"))
                 return
 
-            ad = self._adapter(s.platform) if s else None
-            if ad and s and self._btn.supports_buttons(s.platform) and eng.choices:
+            ad = self._adapter(s.platform)
+            if ad and self._btn.supports_buttons(s.platform) and eng.choices:
                 try:
                     tt = "group" if s.group_id else "user"
                     tid = s.group_id or s.user_id
@@ -875,10 +858,25 @@ class Main(BaseModule):
                 except Exception:
                     pass
 
-            await self._send_game_segment(event, key)
+            await self._send_in_session(key, StoryTemplates.build_game_text(
+                eng.text_plain, eng.choices, s.story_id))
 
         except Exception as e:
             self.logger.error(f"Button: {e}")
+
+    async def _send_in_session(self, key: str, text: str):
+        s = self._sessions.get(key)
+        if not s:
+            return
+        ad = self._adapter(s.platform)
+        if not ad:
+            return
+        tt = "group" if s.group_id else "user"
+        tid = s.group_id or s.user_id
+        try:
+            await ad.Send.To(tt, tid).Text(text)
+        except Exception:
+            pass
 
     async def _ack(self, event):
         try:
